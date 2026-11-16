@@ -1922,6 +1922,11 @@ impl From<&Address> for EthereumSqlTypeWrapper {
     }
 }
 
+/// Number of wrappers a set of ABI components flattens into.
+///
+/// Must agree with `process_tuple`, which emits one wrapper per leaf and none
+/// for the tuple node itself. A `tuple[]` is not flattened - it is stored as a
+/// single JSONB value - and `type_ == "tuple"` excludes it, so it counts as one.
 fn count_components(components: &[ABIInput]) -> usize {
     components
         .iter()
@@ -1929,7 +1934,7 @@ fn count_components(components: &[ABIInput]) -> usize {
             if component.type_ == "tuple" {
                 let nested_components =
                     component.components.as_ref().expect("Tuple should have components defined");
-                1 + count_components(nested_components)
+                count_components(nested_components)
             } else {
                 1
             }
@@ -2110,6 +2115,98 @@ mod tests {
             type_: type_.to_string(),
             components,
         }
+    }
+
+    fn test_tx_information() -> TxInformation {
+        TxInformation {
+            chain_id: 1,
+            network: "ethereum".to_string(),
+            address: Address::ZERO,
+            block_hash: Default::default(),
+            block_number: 1,
+            block_timestamp: None,
+            transaction_hash: Default::default(),
+            log_index: U256::ZERO,
+            transaction_index: 0,
+        }
+    }
+
+    /// A tuple nested inside a tuple is flattened to one wrapper per leaf, so
+    /// the stream/chat JSON payload must consume exactly that many wrappers.
+    #[test]
+    fn nested_tuple_stream_payload_consumes_only_leaf_wrappers() {
+        let inner = make_abi_input(
+            "inner",
+            "tuple",
+            Some(vec![make_abi_input("x", "uint256", None), make_abi_input("y", "uint256", None)]),
+        );
+        let data = make_abi_input(
+            "data",
+            "tuple",
+            Some(vec![make_abi_input("a", "uint256", None), inner]),
+        );
+
+        let token = DynSolValue::Tuple(vec![
+            DynSolValue::Uint(U256::from(1), 256),
+            DynSolValue::Tuple(vec![
+                DynSolValue::Uint(U256::from(2), 256),
+                DynSolValue::Uint(U256::from(3), 256),
+            ]),
+        ]);
+
+        let wrappers = map_log_token_to_ethereum_wrapper(&data, &token);
+        assert_eq!(wrappers.len(), 3, "one wrapper per leaf: a, inner.x, inner.y");
+
+        let json = map_ethereum_wrapper_to_json(
+            std::slice::from_ref(&data),
+            &wrappers,
+            &test_tx_information(),
+            false,
+        );
+
+        assert_eq!(json["data"]["a"], "1");
+        assert_eq!(json["data"]["inner"]["x"], "2");
+        assert_eq!(json["data"]["inner"]["y"], "3");
+    }
+
+    /// The over-count consumed a following field's wrapper, so a field after a
+    /// nested tuple went missing from the payload entirely rather than failing
+    /// loudly. Downstream stream/chat consumers would just never see it.
+    #[test]
+    fn field_after_a_nested_tuple_still_reaches_the_payload() {
+        let inner = make_abi_input(
+            "inner",
+            "tuple",
+            Some(vec![make_abi_input("x", "uint256", None), make_abi_input("y", "uint256", None)]),
+        );
+        let data = make_abi_input(
+            "data",
+            "tuple",
+            Some(vec![make_abi_input("a", "uint256", None), inner]),
+        );
+        let amount = make_abi_input("amount", "uint256", None);
+
+        let mut wrappers = map_log_token_to_ethereum_wrapper(
+            &data,
+            &DynSolValue::Tuple(vec![
+                DynSolValue::Uint(U256::from(1), 256),
+                DynSolValue::Tuple(vec![
+                    DynSolValue::Uint(U256::from(2), 256),
+                    DynSolValue::Uint(U256::from(3), 256),
+                ]),
+            ]),
+        );
+        wrappers.extend(map_log_token_to_ethereum_wrapper(
+            &amount,
+            &DynSolValue::Uint(U256::from(99), 256),
+        ));
+        assert_eq!(wrappers.len(), 4, "leaves: a, inner.x, inner.y, amount");
+
+        let json =
+            map_ethereum_wrapper_to_json(&[data, amount], &wrappers, &test_tx_information(), false);
+
+        assert_eq!(json["data"]["inner"]["y"], "3");
+        assert_eq!(json["amount"], "99", "field after the nested tuple must survive");
     }
 
     #[test]

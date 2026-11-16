@@ -5,6 +5,7 @@
 
 ### Bug fixes
 -------------------------------------------------
+- fix: **events with a tuple inside a tuple no longer break the stream and chat payload** — the JSON payload builder counted a nested tuple as one value plus its contents, while the decoded values are flattened to one entry per leaf. A no-code event carrying a doubly-nested tuple therefore panicked with `range end index ... out of range` when the tuple was the last input, and otherwise swallowed the field that followed it, so stream and chat consumers silently never received that field. Only affects `streams` or `chat` on events with nested tuples; stored table columns were never affected.
 - fix: docs site no longer scrolls sideways on narrow screens. The home page install command wraps inside its block (and scrolls if a token is wider), and the mobile sidebar stays on screen and tappable from 320px up.
 - fix: macOS release binaries statically link OpenSSL, require macOS 11.0 or newer, and use `/etc/ssl/cert.pem` for PostgreSQL TLS when `SSL_CERT_FILE` and `SSL_CERT_DIR` are unset.
 
